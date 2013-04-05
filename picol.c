@@ -344,13 +344,13 @@ static int picol_command_call_proc(PicolInterp *i, int argc, char **argv, void *
         if( ++arity > argc-1 ) goto arityerr;
         picol_set_var( i, start, argv[arity] );
         p++;
-        if (done) break;
+        if( done ) break;
     }
     free(tofree);
-    if (arity != argc-1) goto arityerr;
-    errcode = picol_eval(i,body);
+    if( arity != argc-1 ) goto arityerr;
+    errcode = picol_eval( i, body );
     if( errcode == PICOL_RETURN ) errcode = PICOL_OK;
-    picol_drop_call_frame(i); // remove the called proc callframe
+    picol_drop_call_frame( i ); // remove the called proc callframe
     return errcode;
 arityerr:
     snprintf(errbuf,1024,"Proc '%s' called with wrong arg num",argv[0]);
@@ -361,11 +361,11 @@ arityerr:
 
 static int picol_command_proc( PicolInterp *i, int argc, char **argv, void *pd ) {
     char **procdata = malloc(sizeof(char*)*2);
-    if (argc != 4) return picol_arity_err(i,argv[0]);
+    if( argc != 4 ) return picol_arity_err( i, argv[0] );
 
-    procdata[0] = strdup(argv[2]); // arguments list
-    procdata[1] = strdup(argv[3]); // procedure body
-    return picol_register_command(i,argv[1],picol_command_call_proc,procdata);
+    procdata[0] = strdup( argv[2] ); // arguments list
+    procdata[1] = strdup( argv[3] ); // procedure body
+    return picol_register_command( i, argv[1], picol_command_call_proc, procdata );
 }
 
 static int picol_command_return(PicolInterp *i, int argc, char **argv, void *pd) {
