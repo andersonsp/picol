@@ -30,7 +30,7 @@ struct _PicolInterp {
     char *result;
 };
 
-static void picol_init_parser(PicolParser *p, char *text) {
+static void picol_init_parser( PicolParser *p, char *text ) {
     p->text = p->p = text;
     p->len = strlen(text);
     p->start = 0;
@@ -41,7 +41,7 @@ static void picol_init_parser(PicolParser *p, char *text) {
 
 static int picol_parse_sep( PicolParser *p ) {
     p->start = p->p;
-    while( *p->p == ' ' || *p->p == '\t' || *p->p == '\n' || *p->p == '\r' ) {
+    while( isspace(*p->p) || (*p->p=='\\' && *(p->p+1)=='\n') ) {
         p->p++;
         p->len--;
     }
@@ -52,7 +52,7 @@ static int picol_parse_sep( PicolParser *p ) {
 
 static int picol_parse_eol( PicolParser *p ) {
     p->start = p->p;
-    while( *p->p == ' ' || *p->p == '\t' || *p->p == '\n' || *p->p == '\r' || *p->p == ';' ) {
+    while( isspace(*p->p) || *p->p == ';' ) {
         p->p++;
         p->len--;
     }
@@ -66,10 +66,8 @@ static int picol_parse_command( PicolParser *p ) {
     int blevel = 0;
     p->start = ++p->p;
     p->len--;    // skip the [
-    while (1) {
-        if (p->len <= 0) {
-            break;
-        } else if( *p->p == '[' && blevel == 0 ) {
+    while( p->len ) {
+        if( *p->p == '[' && blevel == 0 ) {
             level++;
         } else if( *p->p == ']' && blevel == 0 ) {
             if( !--level ) break;
@@ -79,7 +77,7 @@ static int picol_parse_command( PicolParser *p ) {
         } else if( *p->p == '{' ) {
             blevel++;
         } else if( *p->p == '}' ) {
-            if (blevel != 0) blevel--;
+            if( blevel != 0 ) blevel--;
         }
         p->p++;
         p->len--;
@@ -441,7 +439,7 @@ int picol_eval( PicolInterp *i, char *t ) {
             if( retcode != PICOL_OK ) goto err;
             t = strdup( i->result );
         } else if( p.type == PT_ESC ) {
-            /* XXX: escape handling missing! */
+            // TODO: escape handling missing!
         } else if( p.type == PT_SEP ) {
             free(t);
             continue;
