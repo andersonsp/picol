@@ -9,9 +9,10 @@
 typedef struct _PicolInterp PicolInterp;
 typedef int (*PicolCmdFunc) ( PicolInterp *i, int argc, char **argv, void *privdata );
 
-enum{ PICOL_OK, PICOL_ERR, PICOL_RETURN, PICOL_BREAK, PICOL_CONTINUE };
+enum { PICOL_OK, PICOL_ERR, PICOL_RETURN, PICOL_BREAK, PICOL_CONTINUE };
 
 PicolInterp *picol_interp_new();
+void picol_interp_destroy( PicolInterp* i );
 int picol_eval( PicolInterp *i, char *t );
 
 int picol_register_command( PicolInterp *i, char *name, PicolCmdFunc f, void *privdata );
