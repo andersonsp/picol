@@ -10,7 +10,7 @@ typedef struct _HashTable HashTable;
 typedef struct {
     char *text, *p;      // current text position
     char *start, *end;   // token start, token end
-    int len, type;       // remaining length, token type: PT_...
+    int type;            // token type: PT_...
     int insidequote;     // True if inside " "
 } PicolParser;
 
@@ -87,7 +87,6 @@ HTabNode* htab_find( HashTable* htab, char* key ) {
 
 static void picol_init_parser( PicolParser *p, char *text ) {
     p->text = p->p = text;
-    p->len = strlen(text);
     p->start = p->end = 0;
     p->insidequote = 0;
     p->type = PT_EOL;
@@ -95,10 +94,7 @@ static void picol_init_parser( PicolParser *p, char *text ) {
 
 static int picol_parse_sep( PicolParser *p ) {
     p->start = p->p;
-    while( isspace(*p->p) || (*p->p=='\\' && *(p->p+1)=='\n') ) {
-        p->p++;
-        p->len--;
-    }
+    while( isspace(*p->p) || (*p->p=='\\' && *(p->p+1)=='\n') ) p->p++;
     p->end = p->p-1;
     p->type = PT_SEP;
     return PICOL_OK;
@@ -106,10 +102,7 @@ static int picol_parse_sep( PicolParser *p ) {
 
 static int picol_parse_eol( PicolParser *p ) {
     p->start = p->p;
-    while( isspace(*p->p) || *p->p == ';' ) {
-        p->p++;
-        p->len--;
-    }
+    while( isspace(*p->p) || *p->p == ';' ) p->p++;
     p->end = p->p-1;
     p->type = PT_EOL;
     return PICOL_OK;
@@ -118,40 +111,31 @@ static int picol_parse_eol( PicolParser *p ) {
 static int picol_parse_command( PicolParser *p ) {
     int level = 1;
     int blevel = 0;
-    p->start = ++p->p;
-    p->len--;    // skip the [
-    while( p->len ) {
+    p->start = ++p->p; // skip the [
+    while( *p->p ) {
         if( *p->p == '[' && blevel == 0 ) {
             level++;
         } else if( *p->p == ']' && blevel == 0 ) {
             if( !--level ) break;
         } else if( *p->p == '\\' ) {
             p->p++;
-            p->len--;
         } else if( *p->p == '{' ) {
             blevel++;
         } else if( *p->p == '}' ) {
             if( blevel != 0 ) blevel--;
         }
         p->p++;
-        p->len--;
     }
     p->end = p->p-1;
     p->type = PT_CMD;
-    if( *p->p == ']' ) {
-        p->p++;
-        p->len--;
-    }
+    if( *p->p == ']' ) p->p++;
     return PICOL_OK;
 }
 
+#define is_alphanum( x ) (x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z') || (x >= '0' && x <= '9')
 static int picol_parse_var( PicolParser *p ) {
-    p->start = ++p->p;
-    p->len--; // skip the $
-    while( (*p->p >= 'a' && *p->p <= 'z') || (*p->p >= 'A' && *p->p <= 'Z') || (*p->p >= '0' && *p->p <= '9') || *p->p == '_' ) {
-        p->p++;
-        p->len--;
-    }
+    p->start = ++p->p; // skip the $
+    while( is_alphanum(*p->p) || *p->p == '_' ) p->p++;
 
     p->end = p->p-1;
     if( p->start == p->p ) { // It's just a single char string "$"
@@ -165,20 +149,15 @@ static int picol_parse_var( PicolParser *p ) {
 
 static int picol_parse_brace( PicolParser *p ) {
     int level = 1;
-    p->start = ++p->p;
-    p->len--;    // skip the opening brace
+    p->start = ++p->p; // skip the opening brace
     while(1) {
-        if( p->len >= 2 && *p->p == '\\' ) {
+        if( p->p[0] && p->p[1] && *p->p == '\\' ) { // NOTE: here was p->len >= 2
             p->p++;
-            p->len--;
-        } else if( p->len == 0 || *p->p == '}' ) {
+        } else if( *p->p == '\0' || *p->p == '}' ) {
             level--;
-            if( level == 0 || p->len == 0 ) {
+            if( level == 0 || *p->p == '\0' ) {
                 p->end = p->p-1;
-                if( p->len ) {
-                    p->p++;
-                    p->len--; // Skip final closed brace
-                }
+                if( *p->p ) p->p++; // Skip final closed brace
                 p->type = PT_STR;
                 return PICOL_OK;
             }
@@ -186,7 +165,6 @@ static int picol_parse_brace( PicolParser *p ) {
             level++;
         }
         p->p++;
-        p->len--;
     }
     return PICOL_OK; // unreached
 }
@@ -197,22 +175,18 @@ static int picol_parse_string( PicolParser *p ) {
         return picol_parse_brace(p);
     } else if( newword && *p->p == '"' ) {
         p->insidequote = 1;
-        p->p++;
-        p->len--;    // skip the quote
+        p->p++; // skip the quote
     }
     p->start = p->p;
     while(1) {
-        if( p->len == 0 ) {
+        if( *p->p == '\0' ) {
             p->end = p->p-1;
             p->type = PT_ESC;
             return PICOL_OK;
         }
         switch( *p->p ) {
             case '\\':
-                if( p->len >= 2 ) {
-                    p->p++;
-                    p->len--;
-                }
+                if( p->p[0] && p->p[1] ) p->p++; // NOTE: here was p->len >= 2
                 break;
             case '$': case '[':
                 p->end = p->p-1;
@@ -230,29 +204,25 @@ static int picol_parse_string( PicolParser *p ) {
                     p->end = p->p-1;
                     p->type = PT_ESC;
                     p->p++;
-                    p->len--;
                     p->insidequote = 0;
                     return PICOL_OK;
                 }
                 break;
         }
-        p->p++; p->len--;
+        p->p++;
     }
     return PICOL_OK; // unreached
 }
 
 static int picol_parse_comment( PicolParser *p ) {
     char *lp = p->p;    // last p
-    while(p->len && (*p->p != '\n' || *lp == '\\')) {
-        lp = p->p++;
-        p->len--;
-    }
+    while( *p->p && (*p->p != '\n' || *lp == '\\') ) lp = p->p++;
     return PICOL_OK;
 }
 
 static int picol_get_token( PicolParser *p ) {
     while(1) {
-        if( !p->len ) {
+        if( *p->p == '\0' ) {
             if( p->type != PT_EOL && p->type != PT_EOF ) p->type = PT_EOL;
             else p->type = PT_EOF;
             return PICOL_OK;
@@ -281,8 +251,8 @@ static int picol_get_token( PicolParser *p ) {
 }
 
 static void picol_set_result( PicolInterp *i, char *s ) {
-    free(i->result);
-    i->result = strdup(s);
+    free( i->result );
+    i->result = strdup( s );
 }
 
 static PicolCmd *picol_get_command( PicolInterp *i, char *name ) {
@@ -299,15 +269,15 @@ static int picol_command_math( PicolInterp *i, int argc, char **argv, void *pd )
     a = atoi( argv[1] );
     b = atoi( argv[2] );
     if( argv[0][0] == '+' ) c = a+b;
-    else if (argv[0][0] == '-') c = a-b;
-    else if (argv[0][0] == '*') c = a*b;
-    else if (argv[0][0] == '/') c = a/b;
-    else if (argv[0][0] == '>' && argv[0][1] == '\0') c = a > b;
-    else if (argv[0][0] == '>' && argv[0][1] == '=') c = a >= b;
-    else if (argv[0][0] == '<' && argv[0][1] == '\0') c = a < b;
-    else if (argv[0][0] == '<' && argv[0][1] == '=') c = a <= b;
-    else if (argv[0][0] == '=' && argv[0][1] == '=') c = a == b;
-    else if (argv[0][0] == '!' && argv[0][1] == '=') c = a != b;
+    else if( argv[0][0] == '-' ) c = a-b;
+    else if( argv[0][0] == '*' ) c = a*b;
+    else if( argv[0][0] == '/' ) c = a/b;
+    else if( argv[0][0] == '>' && argv[0][1] == '\0' ) c = a > b;
+    else if( argv[0][0] == '>' && argv[0][1] == '=' ) c = a >= b;
+    else if( argv[0][0] == '<' && argv[0][1] == '\0' ) c = a < b;
+    else if( argv[0][0] == '<' && argv[0][1] == '=' ) c = a <= b;
+    else if( argv[0][0] == '=' && argv[0][1] == '=' ) c = a == b;
+    else if( argv[0][0] == '!' && argv[0][1] == '=' ) c = a != b;
     else c = 0; // I hate warnings
     snprintf( buf, 64, "%d", c );
     picol_set_result( i, buf );
@@ -329,7 +299,7 @@ static int picol_command_puts( PicolInterp *i, int argc, char **argv, void *pd )
 
 static int picol_command_if( PicolInterp *i, int argc, char **argv, void *pd ) {
     int retcode;
-    if( argc != 3 && argc != 5) return picol_arity_err( i,argv[0] );
+    if( argc != 3 && argc != 5 ) return picol_arity_err( i, argv[0] );
     retcode = picol_eval( i, argv[1] );
     if( retcode != PICOL_OK ) return retcode;
     if( atoi(i->result) ) return picol_eval( i, argv[2] );
@@ -338,9 +308,9 @@ static int picol_command_if( PicolInterp *i, int argc, char **argv, void *pd ) {
 }
 
 static int picol_command_while( PicolInterp *i, int argc, char **argv, void *pd ) {
-    if (argc != 3) return picol_arity_err(i,argv[0]);
+    if( argc != 3 ) return picol_arity_err( i, argv[0] );
     while(1) {
-        int retcode = picol_eval(i,argv[1]);
+        int retcode = picol_eval( i, argv[1] );
         if( retcode != PICOL_OK ) return retcode;
         if( atoi(i->result) ) {
             retcode = picol_eval( i, argv[2] );
@@ -395,11 +365,11 @@ static int picol_command_call_proc(PicolInterp *i, int argc, char **argv, void *
     picol_drop_call_frame( i ); // remove the called proc callframe
     return errcode;
 arityerr:
-    snprintf(errbuf,1024,"Proc '%s' called with wrong arg num",argv[0]);
-    picol_set_result(i,errbuf);
+    snprintf( errbuf, 1024, "Proc '%s' called with wrong arg num", argv[0] );
+    picol_set_result( i, errbuf );
 set_var_err:
-    free(tofree);
-    picol_drop_call_frame(i); // remove the called proc callframe
+    free( tofree );
+    picol_drop_call_frame( i ); // remove the called proc callframe
     return PICOL_ERR;
 }
 
@@ -413,8 +383,8 @@ static int picol_command_proc( PicolInterp *i, int argc, char **argv, void *pd )
 }
 
 static int picol_command_return(PicolInterp *i, int argc, char **argv, void *pd) {
-    if( argc != 1 && argc != 2 ) return picol_arity_err(i,argv[0]);
-    picol_set_result(i, (argc == 2) ? argv[1] : "");
+    if( argc != 1 && argc != 2 ) return picol_arity_err( i, argv[0] );
+    picol_set_result( i, (argc == 2) ? argv[1] : "" );
     return PICOL_RETURN;
 }
 
@@ -463,7 +433,7 @@ int picol_eval( PicolInterp *i, char *t ) {
     char errbuf[1024], **argv = NULL;
     picol_set_result( i, "" );
     picol_init_parser( &p, t );
-    while(1) {
+    while( 1 ) {
         char *t;
         int tlen, prevtype = p.type;
         picol_get_token( &p );
@@ -503,7 +473,7 @@ int picol_eval( PicolInterp *i, char *t ) {
                 PicolCmd *c = picol_get_command( i, argv[0] );
                 if( c == NULL) {
                     snprintf( errbuf, 1024, "No such command '%s'", argv[0] );
-                    picol_set_result(i,errbuf);
+                    picol_set_result( i, errbuf );
                     retcode = PICOL_ERR;
                     goto err;
                 }
