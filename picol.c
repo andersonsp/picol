@@ -1,40 +1,94 @@
 /* Tcl in ~ 500 lines of code by Salvatore antirez Sanfilippo. BSD licensed */
 #include "picol.h"
+#define CALLFRAME_SIZE 1024
+#define COMMANDS_SIZE 4096
 
 enum {PT_ESC, PT_STR, PT_CMD, PT_VAR, PT_SEP, PT_EOL, PT_EOF};
+typedef void (*HTabNodeDestroyValueFunc) ( void* data );
+typedef struct _HashTable HashTable;
 
 typedef struct {
-    char *text, *p;            // current text position
-    int len;                   // remaining length
-    char *start, *end;         // token start, token end
-    int type;             /* token type, PT_... */
-    int insidequote;    /* True if inside " " */
+    char *text, *p;      // current text position
+    char *start, *end;   // token start, token end
+    int len, type;       // remaining length, token type: PT_...
+    int insidequote;     // True if inside " "
 } PicolParser;
 
-struct picolCallFrame {
-    PicolVar *vars;
-    struct picolCallFrame *parent; /* parent is NULL at top level */
+typedef struct {
+    char* key;
+    void* value;
+} HTabNode;
+
+struct _HashTable {
+    int num_nodes;
+    HashTable* parent;   // so we can chain hash tables (useful for callframes)
+    HTabNode nodes[1];
 };
 
-typedef struct _PicolCmd {
-    char *name;
+typedef struct {
     PicolCmdFunc func;
     void *privdata;
-    struct _PicolCmd *next;
 } PicolCmd;
 
 struct _PicolInterp {
-    int level; /* Level of nesting */
-    struct picolCallFrame *callframe;
-    PicolCmd *commands;
+    int level; // Level of nesting
     char *result;
+    HashTable *callframe, *commands;
 };
+
+HashTable* htab_new( int size ) {
+    HashTable* htab = (HashTable*) calloc( 1, sizeof(HashTable) + (size * sizeof(HTabNode)) );
+    if( !htab ) return NULL;
+
+    htab->num_nodes = size;
+    return htab;
+}
+
+void htab_destroy( HashTable* htab, HTabNodeDestroyValueFunc destroy_data ) {
+    int i;
+    for( i = 0; i < htab->num_nodes; i++ ) {
+        if( htab->nodes[i].key ) {
+            free( htab->nodes[i].key );
+            if( destroy_data && htab->nodes[i].value ) destroy_data( htab->nodes[i].value );
+        }
+    }
+
+    free( htab );
+    htab = NULL;
+}
+
+unsigned int htab_hash( HashTable* htab, char* k ) {
+    unsigned int hash = 1;
+    char* c;
+    for( c = k; *c; c++ ) hash += (hash << *c) - *c;
+    return hash % htab->num_nodes;
+}
+
+int htab_set( HashTable* htab, char* k, void* v, int overwrite ) {
+    int hash = htab_hash( htab, k );
+    char *key = htab->nodes[hash].key, *val = htab->nodes[hash].value;
+
+    if( !key ) {
+        htab->nodes[hash].key = strdup( k );
+    } else {
+        if( !overwrite || strcmp(key, k) != 0 ) return 0;
+        if( val ) free( val );
+    }
+
+    htab->nodes[hash].value = v;
+    return 1;
+}
+
+HTabNode* htab_find( HashTable* htab, char* key ) {
+    int hash = htab_hash( htab, key );
+    if( htab->nodes[hash].key != NULL ) return &htab->nodes[hash];
+    return NULL;
+}
 
 static void picol_init_parser( PicolParser *p, char *text ) {
     p->text = p->p = text;
     p->len = strlen(text);
-    p->start = 0;
-    p->end = 0;
+    p->start = p->end = 0;
     p->insidequote = 0;
     p->type = PT_EOL;
 }
@@ -114,7 +168,7 @@ static int picol_parse_brace( PicolParser *p ) {
     p->start = ++p->p;
     p->len--;    // skip the opening brace
     while(1) {
-        if (p->len >= 2 && *p->p == '\\') {
+        if( p->len >= 2 && *p->p == '\\' ) {
             p->p++;
             p->len--;
         } else if( p->len == 0 || *p->p == '}' ) {
@@ -134,7 +188,7 @@ static int picol_parse_brace( PicolParser *p ) {
         p->p++;
         p->len--;
     }
-    return PICOL_OK; /* unreached */
+    return PICOL_OK; // unreached
 }
 
 static int picol_parse_string( PicolParser *p ) {
@@ -184,7 +238,7 @@ static int picol_parse_string( PicolParser *p ) {
         }
         p->p++; p->len--;
     }
-    return PICOL_OK; /* unreached */
+    return PICOL_OK; // unreached
 }
 
 static int picol_parse_comment( PicolParser *p ) {
@@ -223,7 +277,7 @@ static int picol_get_token( PicolParser *p ) {
                 return picol_parse_string(p);
         }
     }
-    return PICOL_OK; /* unreached */
+    return PICOL_OK; // unreached
 }
 
 static void picol_set_result( PicolInterp *i, char *s ) {
@@ -231,12 +285,9 @@ static void picol_set_result( PicolInterp *i, char *s ) {
     i->result = strdup(s);
 }
 
-static PicolCmd *picol_get_command(PicolInterp *i, char *name) {
-    PicolCmd *c = i->commands;
-    while( c ) {
-        if( strcmp(c->name, name) == 0 ) return c;
-        c = c->next;
-    }
+static PicolCmd *picol_get_command( PicolInterp *i, char *name ) {
+    HTabNode* node = htab_find( i->commands, name );
+    if( node ) return node->value;
     return NULL;
 }
 
@@ -265,7 +316,7 @@ static int picol_command_math( PicolInterp *i, int argc, char **argv, void *pd )
 
 static int picol_command_set( PicolInterp *i, int argc, char **argv, void *pd ) {
     if( argc != 3) return picol_arity_err( i, argv[0] );
-    picol_set_var( i, argv[1], argv[2] );
+    if( picol_set_var(i, argv[1], argv[2]) != PICOL_OK ) return PICOL_ERR;
     picol_set_result( i, argv[2] );
     return PICOL_OK;
 }
@@ -303,32 +354,23 @@ static int picol_command_while( PicolInterp *i, int argc, char **argv, void *pd 
 }
 
 static int picol_command_ret_codes( PicolInterp *i, int argc, char **argv, void *pd ) {
-    if (argc != 1) return picol_arity_err(i,argv[0]);
-    if (strcmp(argv[0],"break") == 0) return PICOL_BREAK;
-    else if (strcmp(argv[0],"continue") == 0) return PICOL_CONTINUE;
+    if( argc != 1 ) return picol_arity_err(i,argv[0]);
+    if( strcmp(argv[0], "break") == 0 ) return PICOL_BREAK;
+    else if( strcmp(argv[0], "continue") == 0 ) return PICOL_CONTINUE;
     return PICOL_OK;
 }
 
 static void picol_drop_call_frame( PicolInterp *i ) {
-    struct picolCallFrame *cf = i->callframe;
-    PicolVar *v = cf->vars, *t;
-    while( v ) {
-        t = v->next;
-        free(v->name);
-        free(v->val);
-        free(v);
-        v = t;
-    }
+    HashTable *cf = i->callframe;
     i->callframe = cf->parent;
-    free(cf);
+    htab_destroy( cf, free );
 }
 
 static int picol_command_call_proc(PicolInterp *i, int argc, char **argv, void *pd) {
     char **x=pd, *alist=x[0], *body=x[1], *p=strdup(alist), *tofree;
-    struct picolCallFrame *cf = malloc(sizeof(*cf));
+    HashTable *cf = htab_new( CALLFRAME_SIZE );
     int arity = 0, done = 0, errcode = PICOL_OK;
     char errbuf[1024];
-    cf->vars = NULL;
     cf->parent = i->callframe;
     i->callframe = cf;
     tofree = p;
@@ -342,7 +384,7 @@ static int picol_command_call_proc(PicolInterp *i, int argc, char **argv, void *
         if( p == start ) break;
         if( *p == '\0' ) done=1; else *p = '\0';
         if( ++arity > argc-1 ) goto arityerr;
-        picol_set_var( i, start, argv[arity] );
+        if( picol_set_var(i, start, argv[arity]) != PICOL_OK ) goto set_var_err;
         p++;
         if( done ) break;
     }
@@ -355,6 +397,8 @@ static int picol_command_call_proc(PicolInterp *i, int argc, char **argv, void *
 arityerr:
     snprintf(errbuf,1024,"Proc '%s' called with wrong arg num",argv[0]);
     picol_set_result(i,errbuf);
+set_var_err:
+    free(tofree);
     picol_drop_call_frame(i); // remove the called proc callframe
     return PICOL_ERR;
 }
@@ -388,19 +432,27 @@ static void picol_register_core_commands( PicolInterp *i ) {
     picol_register_command( i, "return", picol_command_return, NULL);
 }
 
+static void picol_destroy_command( void* cmd ){
+    PicolCmd* c = cmd;
+    if( c->privdata ) free( c->privdata );
+    free( c );
+}
+
 // External API
 PicolInterp* picol_interp_new() {
     PicolInterp *i = malloc(sizeof(PicolInterp));
+    if( !i ) return NULL;
     i->level = 0;
-    i->callframe = malloc(sizeof(struct picolCallFrame));
-    i->callframe->vars = NULL;
-    i->callframe->parent = NULL;
-    i->commands = NULL;
+    i->callframe = htab_new( CALLFRAME_SIZE );
+    i->commands = htab_new( COMMANDS_SIZE );
     i->result = strdup("");
+    picol_register_core_commands( i );
+    return i;
 }
 
 void picol_interp_destroy( PicolInterp* i ) {
     if( i->result ) free( i->result );
+    if( i->commands ) htab_destroy( i->commands, picol_destroy_command );
     while( i->callframe ) picol_drop_call_frame( i );
     free( i );
 }
@@ -423,16 +475,16 @@ int picol_eval( PicolInterp *i, char *t ) {
         memcpy(t, p.start, tlen);
         t[tlen] = '\0';
         if( p.type == PT_VAR ) {
-            PicolVar *v = picol_get_var( i, t );
+            char *v = picol_get_var( i, t );
             if( !v ) {
-                snprintf(errbuf,1024,"No such variable '%s'",t);
-                free(t);
-                picol_set_result(i,errbuf);
+                snprintf( errbuf, 1024, "No such variable '%s'", t );
+                free( t );
+                picol_set_result( i, errbuf );
                 retcode = PICOL_ERR;
                 goto err;
             }
-            free(t);
-            t = strdup( v->val );
+            free( t );
+            t = strdup( v );
         } else if( p.type == PT_CMD ) {
             retcode = picol_eval( i, t );
             free(t);
@@ -492,72 +544,38 @@ int picol_arity_err( PicolInterp *i, char *name ) {
 }
 
 int picol_register_command( PicolInterp *i, char *name, PicolCmdFunc f, void *privdata ) {
-    PicolCmd *c = picol_get_command( i, name );
-    char errbuf[1024];
-    if( c ) {
-        snprintf(errbuf,1024,"Command '%s' already defined",name);
-        picol_set_result(i,errbuf);
-        return PICOL_ERR;
-    }
-    c = malloc( sizeof(*c) );
-    c->name = strdup(name);
+    PicolCmd *c = malloc( sizeof(PicolCmd) );
     c->func = f;
     c->privdata = privdata;
-    c->next = i->commands;
-    i->commands = c;
+
+    if( !htab_set(i->commands, name, c, 0) ) {
+        char errbuf[1024];
+        free( c );
+        snprintf( errbuf, 1024, "Command '%s' already defined", name );
+        picol_set_result( i, errbuf );
+        return PICOL_ERR;
+    }
     return PICOL_OK;
 }
 
-//TODO: replace this part with a Hash table
-PicolVar *picol_get_var(PicolInterp *i, char *name) {
-    PicolVar *v = i->callframe->vars;
-    while( v ) {
-        if( strcmp(v->name, name) == 0 ) return v;
-        v = v->next;
-    }
+char *picol_get_var( PicolInterp *i, char *name ) {
+    HTabNode* node = htab_find( i->callframe, name );
+    if( node ) return node->value;
     return NULL;
 }
 
 int picol_set_var(PicolInterp *i, char *name, char *val) {
-    PicolVar *v = picol_get_var(i,name);
-    if (v) {
-        free(v->val);
-        v->val = strdup(val);
-    } else {
-        v = malloc(sizeof(PicolVar));
-        v->name = strdup(name);
-        v->val = strdup(val);
-        v->next = i->callframe->vars;
-        i->callframe->vars = v;
+    char *var_dup = strdup(val);
+    if( !htab_set(i->callframe, name, var_dup, 1) ) {
+        free( var_dup );
+        char errbuf[1024];
+        snprintf( errbuf, 1024, "Couldn't set variable '%s'", name );
+        picol_set_result( i, errbuf );
+        return PICOL_ERR;
     }
     return PICOL_OK;
 }
 
-int main( int argc, char **argv ) {
-    PicolInterp *interp = picol_interp_new();
-    picol_register_core_commands( interp );
-    if( argc == 1 ) {
-        while( 1 ) {
-            char clibuf[1024];
-            int retcode;
-            printf( "picol> " );
-            fflush( stdout );
-            if( fgets(clibuf,1024,stdin) == NULL ) return 0;
-            retcode = picol_eval( interp, clibuf );
-            if( interp->result[0] != '\0' ) printf( "[%d] %s\n", retcode, interp->result );
-        }
-    } else if (argc == 2) {
-        char buf[1024*16];
-        FILE *fp = fopen(argv[1],"r");
-        if( !fp ) {
-            perror("open");
-            exit(1);
-        }
-        buf[ fread(buf, 1, 1024*16, fp) ] = '\0';
-        fclose(fp);
-        if( picol_eval(interp, buf) != PICOL_OK ) printf("%s\n", interp->result);
-    }
-
-    picol_interp_destroy( interp );
-    return 0;
+char *picol_get_result( PicolInterp *i ) {
+    return i->result;
 }
